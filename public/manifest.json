@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "PhishGuard (prototype)",
+  "version": "0.1.0",
+  "description": "Early prototype: flags suspicious links on the page using rule-based checks.",
+  "action": {
+    "default_title": "PhishGuard",
+    "default_popup": "popup.html"
+  },
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
