@@ -7,10 +7,11 @@
     "default_title": "PhishGuard",
     "default_popup": "popup.html"
   },
+  "permissions": ["storage"],
   "background": { "service_worker": "background.js" },
   "content_scripts": [
     {
-      "matches": ["http://*/*", "https://*/*"],
+      "matches": ["http://*/*", "https://*/*", "file:///*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }

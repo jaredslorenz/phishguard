@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>PhishGuard card test page</title>
+    <style>
+      body { font: 16px system-ui, sans-serif; margin: 40px; line-height: 2; }
+      .spacer { height: 140vh; }
+      .right { text-align: right; }
+    </style>
+  </head>
+  <body>
+    <h1>Hover card checks</h1>
+    <p>Suspicious: <a href="https://paypal-secure.com/">PayPal support</a></p>
+    <p>High risk: <a href="https://paypal.com.account-check.xyz/signin">www.paypal.com</a></p>
+    <p>Hostile text: <a href="https://paypa1.com/login">&lt;img src=x onerror=alert(1)&gt;</a></p>
+    <p class="right">Right edge: <a href="https://rnicrosoft.com/">Microsoft account</a></p>
+    <p>Clean (no card): <a href="https://www.google.com/">Google</a></p>
+    <p>
+      Check: hover each flagged link; Tab to one (card opens, focus stays), Tab again (focus moves to the card),
+      Escape (card closes, focus back on the link); scroll while open; then try the link at the bottom.
+      In DevTools, <code>document.querySelector("phishguard-card").shadowRoot</code> must be null.
+    </p>
+    <div class="spacer"></div>
+    <p>Bottom edge (card should open above): <a href="http://203.0.113.5/verify">Verify account</a></p>
+  </body>
+</html>

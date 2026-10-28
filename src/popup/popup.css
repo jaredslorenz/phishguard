@@ -1,0 +1,23 @@
+@import "tailwindcss" source(".");
+
+/* Same tokens as the hover card (src/card/card.css). */
+@theme {
+  --color-sus-bg: #fff4d6;
+  --color-sus-fg: #7a5200;
+  --color-sus-bar: #e8a400;
+  --color-high-bg: #fde7e5;
+  --color-high-fg: #a3140b;
+  --color-high-bar: #b42318;
+  --color-ink: #1f2328;
+  --color-muted: #5b6470;
+  --color-line: #cbd2db;
+  --color-divider: #e4e7ec;
+  --color-chip: #f1f3f5;
+  --color-brand: #3b5bdb;
+}
+
+@layer base {
+  body {
+    @apply w-[380px] bg-white font-sans text-[13px] leading-snug text-ink antialiased;
+  }
+}

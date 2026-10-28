@@ -8,11 +8,26 @@ export interface Reason {
   message: string;
 }
 
+export interface Destination {
+  host: string;
+  /** Registrable domain from tldts; null for a raw IP address. */
+  registrable: string | null;
+  subdomain: string;
+}
+
 export interface Analysis {
   url: string;
+  /** Capped at 100. */
   score: number;
+  /** Sum of reason points before the cap. */
+  rawScore: number;
   level: Level;
+  /** Sorted by points, highest first. */
   reasons: Reason[];
+  /** Where the link really goes, after unwrapping known redirects. */
+  destination: Destination;
+  /** Registrable domain the link text claims, if the text looks like a URL. */
+  claimedDomain: string | null;
 }
 
 export const SUSPICIOUS_THRESHOLD = 30;
@@ -51,6 +66,9 @@ const BRAND_OWNED_DOMAINS = new Set([
   "fbcdn.net",
 ]);
 
+/** Known-good services that host brand-named subdomains for their customers (csulb.instructure.com is Canvas). */
+const TRUSTED_DOMAINS = new Set(["instructure.com"]);
+
 const SHORTENERS = new Set([
   "bit.ly",
   "tinyurl.com",
@@ -62,6 +80,9 @@ const SHORTENERS = new Set([
   "rebrand.ly",
   "cutt.ly",
 ]);
+
+/** A platform's own shortener on its own site, where every outbound link goes through it. */
+const SHORTENER_HOMES: Record<string, string[]> = { "t.co": ["x.com", "twitter.com"] };
 
 /** TLDs that are cheap/abused often enough to deserve a small nudge, never a flag by themselves. */
 const RISKY_TLDS = new Set(["zip", "mov", "top", "xyz", "tk", "ml", "ga", "cf", "gq", "click", "link", "work", "country"]);
@@ -98,6 +119,15 @@ function registrableOf(host: string): string | null {
   return parse(host).domain;
 }
 
+function registrableOfPage(pageUrl: string): string | null {
+  if (!pageUrl) return null;
+  try {
+    return registrableOf(new URL(pageUrl).hostname);
+  } catch {
+    return null;
+  }
+}
+
 /** Host that the visible link text *claims* to point at, if the text looks like a URL/domain. */
 function hostFromText(text: string): string | null {
   const t = text.trim().toLowerCase();
@@ -105,13 +135,76 @@ function hostFromText(text: string): string | null {
   const candidate = /^https?:\/\//.test(t) ? t : /^[a-z0-9-]+(\.[a-z0-9-]+)+(\/.*)?$/.test(t) ? `https://${t}` : null;
   if (!candidate) return null;
   try {
-    return new URL(candidate).hostname;
+    const host = new URL(candidate).hostname;
+    // "package.json" or "analyzer.ts" is a filename, not a domain: require a real domain ending.
+    return parse(host).isIcann ? host : null;
   } catch {
     return null;
   }
 }
 
-export function analyzeUrl(rawUrl: string, linkText = "", pageUrl = ""): Analysis {
+/** RFC 1918 private ranges, loopback and link-local, for IPv4 and IPv6 (URL hostnames keep IPv6 brackets). */
+function isPrivateIp(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, "").toLowerCase();
+  const v4 = h.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  }
+  return h === "::1" || /^f[cd][0-9a-f]{2}:/.test(h) || /^fe[89ab][0-9a-f]:/.test(h);
+}
+
+function lastPathSegment(url: URL): string {
+  const seg = url.pathname.split("/").filter(Boolean).pop() ?? "";
+  try {
+    return decodeURIComponent(seg).toLowerCase();
+  } catch {
+    return seg.toLowerCase();
+  }
+}
+
+/**
+ * Known redirect wrappers (Google/Gmail, Outlook SafeLinks, Facebook) carry the real destination in a
+ * query parameter. Returns that destination so every rule runs on where the link actually goes.
+ * Only these exact hosts/paths are unwrapped: a ?q= on any other site is not trusted.
+ */
+function unwrapRedirect(url: URL): URL | null {
+  const host = url.hostname.toLowerCase();
+  let target: string | null = null;
+  if ((host === "www.google.com" || host === "google.com") && url.pathname === "/url") {
+    target = url.searchParams.get("q") ?? url.searchParams.get("url");
+  } else if (host.endsWith(".safelinks.protection.outlook.com")) {
+    target = url.searchParams.get("url");
+  } else if ((host === "l.facebook.com" || host === "lm.facebook.com") && url.pathname === "/l.php") {
+    target = url.searchParams.get("u");
+  }
+  if (!target) return null;
+  try {
+    const inner = new URL(target);
+    return inner.protocol === "http:" || inner.protocol === "https:" ? inner : null;
+  } catch {
+    return null;
+  }
+}
+
+function notAnalyzed(rawUrl: string): Analysis {
+  return {
+    url: rawUrl,
+    score: 0,
+    rawScore: 0,
+    level: "safe",
+    reasons: [],
+    destination: { host: "", registrable: null, subdomain: "" },
+    claimedDomain: null,
+  };
+}
+
+export interface AnalyzeOptions {
+  /** Registrable domains the user chose to trust. They skip the brand-name and credential-word rules only. */
+  trusted?: ReadonlySet<string>;
+}
+
+export function analyzeUrl(rawUrl: string, linkText = "", pageUrl = "", options: AnalyzeOptions = {}): Analysis {
   const reasons: Reason[] = [];
   const add = (rule: string, points: number, message: string) => reasons.push({ rule, points, message });
 
@@ -119,20 +212,38 @@ export function analyzeUrl(rawUrl: string, linkText = "", pageUrl = ""): Analysi
   try {
     url = new URL(rawUrl, pageUrl || undefined);
   } catch {
-    return { url: rawUrl, score: 0, level: "safe", reasons };
+    return notAnalyzed(rawUrl);
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    return { url: rawUrl, score: 0, level: "safe", reasons };
+    return notAnalyzed(rawUrl);
+  }
+
+  // Bounded so nested wrappers can't loop forever.
+  for (let i = 0; i < 3; i++) {
+    const inner = unwrapRedirect(url);
+    if (!inner) break;
+    url = inner;
   }
 
   const host = url.hostname.toLowerCase();
   const info = parse(host);
   const registrable = info.domain;
   const label = registrable ? brandLabel(registrable) : "";
+  const pageRegistrable = registrableOfPage(pageUrl);
+  // Links back to the site you're already on can't be impersonating it, so the brand rules don't apply.
+  const sameSite = registrable !== null && registrable === pageRegistrable;
+
+  // Private/loopback addresses (routers, lab machines, localhost dev servers) can't host phishing for
+  // someone on the internet, so the IP rules only apply to public addresses.
+  const publicIp = info.isIp === true && !isPrivateIp(host);
+  const credentialWord = CREDENTIAL_WORDS.find((w) => (host + url.pathname).toLowerCase().includes(w));
 
   // 1. Raw IP address instead of a domain name
-  if (info.isIp) {
+  if (publicIp) {
     add("ip-host", 45, "Link goes to a raw IP address instead of a domain name");
+    if (credentialWord) {
+      add("credential-words", 10, `Contains "${credentialWord}" on a raw IP address`);
+    }
   }
 
   // 2. user@host trick: https://paypal.com@evil.com
@@ -146,14 +257,20 @@ export function analyzeUrl(rawUrl: string, linkText = "", pageUrl = ""): Analysi
   }
 
   // 4. Plain HTTP
-  if (url.protocol === "http:" && !info.isIp) {
+  if (url.protocol === "http:" && (!info.isIp || publicIp)) {
     add("no-https", 10, "Link is not using HTTPS");
   }
 
   if (registrable && !info.isIp) {
-    const ownedByBrand = BRANDS.includes(registrable) || BRAND_OWNED_DOMAINS.has(registrable);
+    // Reputation, not deception: trust skips the brand rules and credential words, while ip-host, userinfo,
+    // punycode and text-mismatch still run for trusted domains.
+    const ownedByBrand =
+      BRANDS.includes(registrable) ||
+      BRAND_OWNED_DOMAINS.has(registrable) ||
+      TRUSTED_DOMAINS.has(registrable) ||
+      (options.trusted?.has(registrable) ?? false);
 
-    if (!ownedByBrand) {
+    if (!ownedByBrand && !sameSite) {
       // 5. Brand name placed in subdomain/path but real domain is something else
       const subLabels = (info.subdomain ?? "").split(".").filter(Boolean);
       const brandInSub = BRANDS.find((b) => subLabels.includes(brandLabel(b)));
@@ -206,10 +323,8 @@ export function analyzeUrl(rawUrl: string, linkText = "", pageUrl = ""): Analysi
     }
 
     // 12. Login-style words on a domain that isn't a known brand
-    const pathAndHost = (host + url.pathname).toLowerCase();
-    const word = CREDENTIAL_WORDS.find((w) => pathAndHost.includes(w));
-    if (word && !ownedByBrand) {
-      add("credential-words", 10, `Contains "${word}" on a domain that is not a known service`);
+    if (credentialWord && !ownedByBrand) {
+      add("credential-words", 10, `Contains "${credentialWord}" on a domain that is not a known service`);
     }
 
     // 13. Excess hyphens
@@ -220,13 +335,17 @@ export function analyzeUrl(rawUrl: string, linkText = "", pageUrl = ""): Analysi
 
   // 14. Link text claims one site, href goes to another
   const claimedHost = hostFromText(linkText);
-  if (claimedHost) {
-    const claimed = registrableOf(claimedHost);
-    if (claimed && registrable && claimed !== registrable) {
-      // Tracking redirects can cause benign mismatches, so a generic mismatch stays below "high";
-      // claiming to be a known brand pushes it over.
-      const pts = BRANDS.includes(claimed) ? 65 : 55;
-      add("text-mismatch", pts, `Link text says ${claimed} but it actually goes to ${registrable}`);
+  const claimedDomain = claimedHost ? registrableOf(claimedHost) : null;
+  if (claimedDomain && registrable && claimedDomain !== registrable) {
+    const claimsBrand = BRANDS.includes(claimedDomain);
+    // Text "README.md" linking to .../README.md on the same site is a filename, not a claimed domain.
+    const isFileLink = !claimsBrand && sameSite && lastPathSegment(url) === linkText.trim().toLowerCase();
+    const isHomeShortener = !claimsBrand && (SHORTENER_HOMES[registrable] ?? []).includes(pageRegistrable ?? "");
+    if (!isFileLink && !isHomeShortener) {
+      // Claiming a known brand is always high. A shortener hides the destination, so we can't tell the
+      // text is wrong: a non-brand claim through one only reaches "suspicious".
+      const pts = claimsBrand ? 65 : SHORTENERS.has(registrable) ? 25 : 55;
+      add("text-mismatch", pts, `Link text says ${claimedDomain} but it actually goes to ${registrable}`);
     }
   }
 
@@ -235,7 +354,17 @@ export function analyzeUrl(rawUrl: string, linkText = "", pageUrl = ""): Analysi
     add("long-url", 10, "Very long URL");
   }
 
-  const score = Math.min(100, reasons.reduce((s, r) => s + r.points, 0));
+  reasons.sort((a, b) => b.points - a.points);
+  const rawScore = reasons.reduce((s, r) => s + r.points, 0);
+  const score = Math.min(100, rawScore);
   const level: Level = score >= HIGH_THRESHOLD ? "high" : score >= SUSPICIOUS_THRESHOLD ? "suspicious" : "safe";
-  return { url: url.href, score, level, reasons };
+  return {
+    url: url.href,
+    score,
+    rawScore,
+    level,
+    reasons,
+    destination: { host, registrable: info.isIp ? null : registrable, subdomain: info.subdomain ?? "" },
+    claimedDomain,
+  };
 }

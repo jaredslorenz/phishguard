@@ -1,9 +1,18 @@
-import { analyzeUrl } from "./analyzer";
+import cardCss from "../build/card.css";
+import { analyzeUrl, type Analysis } from "./analyzer";
+import { initHoverCard } from "./card/hover";
 import type { ContentToBackground, ContentToPopup, FlaggedLink, PopupToContent } from "./messages";
+import { emptyDelta, isEmptyDelta } from "./stats";
+import { addTrusted, getTrusted, onTrustedChange, removeTrusted } from "./trust";
 
 const ATTR = "data-phishguard";
 let flagged: FlaggedLink[] = [];
 let total = 0;
+let results = new WeakMap<HTMLAnchorElement, Analysis>();
+let trusted: ReadonlySet<string> = new Set();
+/** Links already counted in stats this page load, so rescans don't count them twice. */
+const counted = new WeakSet<HTMLAnchorElement>();
+let pageCounted = false;
 
 function injectStyles(): void {
   if (document.getElementById("phishguard-style")) return;
@@ -16,42 +25,104 @@ function injectStyles(): void {
   document.documentElement.appendChild(style);
 }
 
+const observer = new MutationObserver(scheduleScan);
+let timer: number | undefined;
+
+/**
+ * Reloading or updating the extension leaves this script running in tabs that were already open, but cut
+ * off from the extension: every chrome.* call then throws "Extension context invalidated". When that
+ * happens, stop watching the page and go quiet. Outlines already drawn stay until the tab is reloaded.
+ */
+function extensionAlive(): boolean {
+  if (chrome.runtime?.id) return true;
+  shutDown();
+  return false;
+}
+
+function shutDown(): void {
+  observer.disconnect();
+  window.clearTimeout(timer);
+}
+
+/** sendMessage throws synchronously (not a rejected promise) once the context is gone. */
+function send(msg: ContentToBackground): void {
+  if (!extensionAlive()) return;
+  try {
+    chrome.runtime.sendMessage(msg).catch(() => {});
+  } catch {
+    shutDown();
+  }
+}
+
 function scan(): void {
+  if (!extensionAlive()) return;
   const anchors = document.querySelectorAll<HTMLAnchorElement>("a[href]");
   const next: FlaggedLink[] = [];
+  const nextResults = new WeakMap<HTMLAnchorElement, Analysis>();
+  const delta = emptyDelta();
   let count = 0;
 
   anchors.forEach((a) => {
     count++;
-    const analysis = analyzeUrl(a.href, a.textContent ?? "", location.href);
+    const analysis = analyzeUrl(a.href, a.textContent ?? "", location.href, { trusted });
+    if (!counted.has(a)) {
+      counted.add(a);
+      delta.linksScanned++;
+      if (analysis.level !== "safe") {
+        delta[analysis.level]++;
+        for (const r of analysis.reasons) delta.ruleCounts[r.rule] = (delta.ruleCounts[r.rule] ?? 0) + 1;
+      }
+    }
     if (analysis.level === "safe") {
       a.removeAttribute(ATTR);
       return;
     }
     a.setAttribute(ATTR, analysis.level);
-    a.title = `PhishGuard: ${analysis.reasons.map((r) => r.message).join("; ")}`;
+    nextResults.set(a, analysis);
     next.push({ href: a.href, text: (a.textContent ?? "").trim().slice(0, 80), analysis });
   });
 
   total = count;
+  results = nextResults;
+  hoverCard.refresh();
   flagged = next.sort((x, y) => y.analysis.score - x.analysis.score);
-  const msg: ContentToBackground = { type: "RESULTS", flagged: flagged.length };
-  chrome.runtime.sendMessage(msg).catch(() => {});
+  send({ type: "RESULTS", flagged: flagged.length });
+
+  if (!pageCounted) {
+    pageCounted = true;
+    delta.pagesScanned = 1;
+  }
+  if (!isEmptyDelta(delta)) send({ type: "STATS_DELTA", delta });
 }
 
-let timer: number | undefined;
 function scheduleScan(): void {
   window.clearTimeout(timer);
   timer = window.setTimeout(scan, 300);
 }
 
+// The card's Trust/Undo buttons write to storage, which also throws once the extension is reloaded.
+const hoverCard = initHoverCard((a) => results.get(a), cardCss, {
+  add: (domain) => (extensionAlive() ? addTrusted(domain).catch(() => {}) : Promise.resolve()),
+  remove: (domain) => (extensionAlive() ? removeTrusted(domain).catch(() => {}) : Promise.resolve()),
+});
+
 injectStyles();
-scan();
-new MutationObserver(scheduleScan).observe(document.body, { childList: true, subtree: true });
+// Load the trusted list before the first scan so trusted links never flash an outline; rescan when it changes.
+void getTrusted()
+  .catch(() => new Set<string>())
+  .then((domains) => {
+    trusted = domains;
+    scan();
+  });
+onTrustedChange((domains) => {
+  trusted = domains;
+  scan();
+});
+observer.observe(document.body, { childList: true, subtree: true });
 
 chrome.runtime.onMessage.addListener((msg: PopupToContent, _sender, sendResponse) => {
   if (msg?.type === "GET_RESULTS") {
-    const res: ContentToPopup = { type: "RESULTS", total, flagged };
+    const res: ContentToPopup = { type: "RESULTS", total, flagged, pageUrl: location.href };
     sendResponse(res);
   }
 });

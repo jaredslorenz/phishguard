@@ -1,0 +1,33 @@
+/* Built to build/card.css and injected into the card's closed shadow root. Never loaded into the page. */
+@import "tailwindcss" source(".");
+
+@theme {
+  --color-sus-bg: #fff4d6;
+  --color-sus-fg: #7a5200;
+  --color-sus-bar: #e8a400;
+  --color-high-bg: #fde7e5;
+  --color-high-fg: #a3140b;
+  --color-high-bar: #b42318;
+  --color-ink: #1f2328;
+  --color-muted: #5b6470;
+  --color-line: #cbd2db;
+  --color-divider: #e4e7ec;
+  --color-chip: #f1f3f5;
+
+  --animate-pg-in: pg-in 120ms ease-out;
+  @keyframes pg-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
+
+@layer base {
+  /* Cut off everything the host page's styles would otherwise pass down. */
+  .pg-root {
+    all: initial;
+  }
+}

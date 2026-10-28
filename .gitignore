@@ -1,2 +1,21 @@
 node_modules
 dist
+build
+
+# macOS Finder junk
+.DS_Store
+
+# npm debug logs
+npm-debug.log*
+
+# test coverage reports
+coverage/
+
+# packed extension files (.pem is the extension's private signing key: never commit it)
+*.crx
+*.pem
+*.zip
+
+# Claude Code project instructions (kept local)
+CLAUDE.md
+CLAUDE.local.md

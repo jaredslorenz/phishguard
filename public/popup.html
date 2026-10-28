@@ -1,28 +1,12 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <title>PhishGuard</title>
-    <style>
-      body { font: 13px system-ui, sans-serif; width: 360px; margin: 0; padding: 12px; color: #202124; }
-      h1 { font-size: 15px; margin: 0 0 4px; }
-      .sub { color: #5f6368; margin-bottom: 10px; }
-      .item { border: 1px solid #dadce0; border-radius: 6px; padding: 8px; margin-bottom: 8px; }
-      .item.high { border-left: 4px solid #d93025; }
-      .item.suspicious { border-left: 4px solid #f29900; }
-      .badge { font-weight: 600; font-size: 11px; text-transform: uppercase; }
-      .high .badge { color: #d93025; }
-      .suspicious .badge { color: #b06000; }
-      .url { word-break: break-all; font-family: ui-monospace, monospace; font-size: 11px; margin: 4px 0; }
-      ul { margin: 4px 0 0; padding-left: 18px; }
-      .note { color: #5f6368; font-size: 11px; margin-top: 10px; }
-    </style>
+    <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <h1>PhishGuard <small>(prototype)</small></h1>
-    <div id="summary" class="sub">Scanning…</div>
-    <div id="list"></div>
-    <div class="note">Rule-based checks only. A clean result does not guarantee a link is safe.</div>
+    <div id="root"></div>
     <script src="popup.js"></script>
   </body>
 </html>
