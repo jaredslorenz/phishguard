@@ -115,14 +115,23 @@ function brandLabel(domain: string): string {
   return domain.split(".")[0]!;
 }
 
-function registrableOf(host: string): string | null {
-  return parse(host).domain;
+/** Count Public Suffix List private entries (github.io, vercel.app, web.app, s3.amazonaws.com...) as suffixes. */
+const PRIVATE_SUFFIXES = { allowPrivateDomains: true };
+
+/**
+ * The site a host belongs to. On hosting platforms each customer is their own site: secure-paypal.vercel.app,
+ * not vercel.app, so brand names in the customer's name are visible to the rules and trusting one github.io
+ * site doesn't trust them all. Falls back to the ICANN domain for a host that is itself a private suffix
+ * (s3.amazonaws.com).
+ */
+export function siteOf(host: string): string | null {
+  return parse(host, PRIVATE_SUFFIXES).domain ?? parse(host).domain;
 }
 
 function registrableOfPage(pageUrl: string): string | null {
   if (!pageUrl) return null;
   try {
-    return registrableOf(new URL(pageUrl).hostname);
+    return siteOf(new URL(pageUrl).hostname);
   } catch {
     return null;
   }
@@ -226,8 +235,10 @@ export function analyzeUrl(rawUrl: string, linkText = "", pageUrl = "", options:
   }
 
   const host = url.hostname.toLowerCase();
-  const info = parse(host);
-  const registrable = info.domain;
+  const info = parse(host, PRIVATE_SUFFIXES);
+  // The ICANN view (github.io, amazonaws.com) answers "which company runs this?" for the built-in lists.
+  const icann = parse(host);
+  const registrable = info.domain ?? icann.domain;
   const label = registrable ? brandLabel(registrable) : "";
   const pageRegistrable = registrableOfPage(pageUrl);
   // Links back to the site you're already on can't be impersonating it, so the brand rules don't apply.
@@ -264,16 +275,20 @@ export function analyzeUrl(rawUrl: string, linkText = "", pageUrl = "", options:
   if (registrable && !info.isIp) {
     // Reputation, not deception: trust skips the brand rules and credential words, while ip-host, userinfo,
     // punycode and text-mismatch still run for trusted domains.
+    // Built-in lists match the company's domain (raw.githubusercontent.com is GitHub's); user trust matches the
+    // exact site, so trusting someone.github.io never trusts attacker.github.io.
+    const company = icann.domain ?? registrable;
     const ownedByBrand =
-      BRANDS.includes(registrable) ||
-      BRAND_OWNED_DOMAINS.has(registrable) ||
-      TRUSTED_DOMAINS.has(registrable) ||
+      BRANDS.includes(company) ||
+      BRAND_OWNED_DOMAINS.has(company) ||
+      TRUSTED_DOMAINS.has(company) ||
       (options.trusted?.has(registrable) ?? false);
 
     if (!ownedByBrand && !sameSite) {
-      // 5. Brand name placed in subdomain/path but real domain is something else
-      const subLabels = (info.subdomain ?? "").split(".").filter(Boolean);
-      const brandInSub = BRANDS.find((b) => subLabels.includes(brandLabel(b)));
+      // 5. Brand name placed in subdomain/path but real domain is something else. Hyphenated labels are split
+      // too, so paypal-secure.com.evil.xyz is caught like paypal.com.evil.xyz.
+      const subTokens = (info.subdomain ?? "").split(/[.-]/).filter(Boolean);
+      const brandInSub = BRANDS.find((b) => subTokens.includes(brandLabel(b)));
       if (brandInSub) {
         add("brand-in-subdomain", 50, `Contains "${brandLabel(brandInSub)}" in the subdomain, but the real domain is ${registrable}`);
       }
@@ -313,8 +328,8 @@ export function analyzeUrl(rawUrl: string, linkText = "", pageUrl = "", options:
     }
 
     // 10. Risky TLD
-    if (info.publicSuffix && RISKY_TLDS.has(info.publicSuffix)) {
-      add("risky-tld", 10, `.${info.publicSuffix} is a domain ending often abused in scams`);
+    if (icann.publicSuffix && RISKY_TLDS.has(icann.publicSuffix)) {
+      add("risky-tld", 10, `.${icann.publicSuffix} is a domain ending often abused in scams`);
     }
 
     // 11. URL shortener hides destination
@@ -335,7 +350,7 @@ export function analyzeUrl(rawUrl: string, linkText = "", pageUrl = "", options:
 
   // 14. Link text claims one site, href goes to another
   const claimedHost = hostFromText(linkText);
-  const claimedDomain = claimedHost ? registrableOf(claimedHost) : null;
+  const claimedDomain = claimedHost ? siteOf(claimedHost) : null;
   if (claimedDomain && registrable && claimedDomain !== registrable) {
     const claimsBrand = BRANDS.includes(claimedDomain);
     // Text "README.md" linking to .../README.md on the same site is a filename, not a claimed domain.

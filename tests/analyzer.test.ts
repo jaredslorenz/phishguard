@@ -286,3 +286,54 @@ describe("user-trusted domains", () => {
     expect(analyzeUrl(url, text, page, { trusted: new Set() })).toEqual(base);
   });
 });
+
+describe("hosting platforms: each customer is its own site", () => {
+  it.each([
+    "https://paypal-login.web.app/signin",
+    "https://secure-paypal.vercel.app/",
+    "https://chase-verify.netlify.app/login",
+    "https://g00gle.github.io/",
+    "https://paypal.github.io/account",
+  ])("brand names in a hosted site's name are caught: %s", (url) => {
+    expect(analyzeUrl(url).level).not.toBe("safe");
+  });
+
+  it("shows the customer's site as the destination", () => {
+    expect(analyzeUrl("https://secure-paypal.vercel.app/").destination.registrable).toBe("secure-paypal.vercel.app");
+  });
+
+  it.each([
+    "https://someone.github.io/portfolio",
+    "https://my-class-project.vercel.app/",
+    "https://raw.githubusercontent.com/jaredslorenz/phishguard/main/README.md",
+    "https://lh3.googleusercontent.com/a/photo.jpg",
+    "https://storage.googleapis.com/bucket/file.pdf",
+    "https://mybucket.s3.amazonaws.com/file.png",
+  ])("ordinary hosted sites and brand-owned hosting stay safe: %s", (url) => {
+    expect(analyzeUrl(url).level).toBe("safe");
+  });
+
+  it("trusting one hosted site does not trust its neighbours", () => {
+    const trusted = new Set(["paypal-login.web.app"]);
+    expect(analyzeUrl("https://paypal-login.web.app/", "", "", { trusted }).level).toBe("safe");
+    expect(analyzeUrl("https://paypal-verify.web.app/", "", "", { trusted }).level).not.toBe("safe");
+  });
+
+  it("links between two sites on the same platform are not same-site", () => {
+    const a = analyzeUrl("https://paypal-login.web.app/", "", "https://my-blog.web.app/");
+    expect(a.reasons.map((r) => r.rule)).toContain("brand-token");
+  });
+});
+
+describe("hyphenated brand names in subdomains", () => {
+  it("catches paypal-secure.com.evil.xyz", () => {
+    const a = analyzeUrl("https://paypal-secure.com.evil.xyz/login");
+    expect(a.reasons.map((r) => r.rule)).toContain("brand-in-subdomain");
+    expect(a.level).toBe("high");
+  });
+
+  it("does not match brand names inside longer words", () => {
+    expect(analyzeUrl("https://pineapple-recipes.example.org/").level).toBe("safe");
+    expect(analyzeUrl("https://chasers.example.org/").level).toBe("safe");
+  });
+});

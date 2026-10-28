@@ -20,17 +20,29 @@ export function SectionLabel({ children }: { children: ReactNode }) {
 }
 
 /** A destructive action that needs a second click: "Clear all" → "Clear all trusted sites? Cancel / Clear". */
-export function ConfirmButton({ label, question, confirmLabel, onConfirm }: { label: string; question: string; confirmLabel: string; onConfirm: () => void }) {
+export function ConfirmButton({
+  label,
+  question,
+  confirmLabel,
+  onConfirm,
+  buttonClass = BUTTON.quiet,
+}: {
+  label: string;
+  question: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+  buttonClass?: string;
+}) {
   const [asking, setAsking] = useState(false);
   if (!asking) {
     return (
-      <button type="button" className={BUTTON.quiet} onClick={() => setAsking(true)}>
+      <button type="button" className={buttonClass} onClick={() => setAsking(true)}>
         {label}
       </button>
     );
   }
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       <span className="text-[12px]">{question}</span>
       <button type="button" className={BUTTON.secondary} onClick={() => setAsking(false)} autoFocus>
         Cancel

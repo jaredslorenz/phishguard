@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { parse } from "tldts";
-import type { ContentToPopup, FlaggedLink, PopupToContent } from "../messages";
+import { siteOf } from "../analyzer";
+import type { ContentToPopup, FlaggedLink, PopupToContent, ShowLinkResult } from "../messages";
 import { addTrusted, getTrusted, onTrustedChange, removeTrusted } from "../trust";
-import { BUTTON, LEVEL } from "./ui";
+import { BUTTON, ConfirmButton, LEVEL } from "./ui";
 
-type Load = { status: "loading" } | { status: "error"; message: string } | { status: "done"; res: ContentToPopup };
+type Load = { status: "loading" } | { status: "error"; message: string } | { status: "done"; res: ContentToPopup; tabId: number };
 
 /** How long to wait for the page to rescan after the trusted list changes. */
 const RESCAN_WAIT_MS = 400;
@@ -16,13 +16,26 @@ async function fetchResults(): Promise<Load> {
     const msg: PopupToContent = { type: "GET_RESULTS" };
     const res: ContentToPopup | undefined = await chrome.tabs.sendMessage(tab.id, msg);
     if (!res) return { status: "error", message: "No result from the page. Try reloading it." };
-    return { status: "done", res };
+    return { status: "done", res, tabId: tab.id };
   } catch {
     return { status: "error", message: "PhishGuard can't scan this page. Browser pages and the Chrome Web Store are off limits; for other pages, try reloading." };
   }
 }
 
-function LinkRow({ link }: { link: FlaggedLink }) {
+/** Ask the page to scroll to a flagged link and flash it. False when it's gone or hidden. */
+async function showOnPage(tabId: number, id: number): Promise<boolean> {
+  try {
+    const msg: PopupToContent = { type: "SHOW_LINK", id };
+    const res: ShowLinkResult | undefined = await chrome.tabs.sendMessage(tabId, msg);
+    return res?.shown ?? false;
+  } catch {
+    return false;
+  }
+}
+
+function LinkRow({ link, onShow }: { link: FlaggedLink; onShow: () => Promise<boolean> }) {
+  const [expanded, setExpanded] = useState(false);
+  const [hidden, setHidden] = useState(false);
   const { level, score, reasons, destination } = link.analysis;
   if (level === "safe") return null;
   const l = LEVEL[level];
@@ -35,10 +48,40 @@ function LinkRow({ link }: { link: FlaggedLink }) {
       </div>
       <div className="mt-1.5 font-mono text-[13px] font-semibold break-all">{destination.registrable ?? destination.host}</div>
       {link.text && <div className="mt-0.5 truncate text-[12px] text-muted">Link text: “{link.text}”</div>}
-      {top && <div className="mt-1.5">{top.message}</div>}
-      {rest.length > 0 && (
-        <div className="mt-0.5 text-[12px] text-muted">
-          +{rest.length} more {rest.length === 1 ? "rule" : "rules"}
+      {expanded ? (
+        <ul className="mt-1.5 space-y-1">
+          {reasons.map((r) => (
+            <li key={r.rule} className="flex items-start gap-2">
+              <span className="min-w-0 flex-1">{r.message}</span>
+              <span className="shrink-0 rounded-full bg-chip px-1.5 text-[11px] font-semibold text-muted tabular-nums">+{r.points}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        top && <div className="mt-1.5">{top.message}</div>
+      )}
+      <div className="mt-1.5 flex items-center gap-3 text-[12px]">
+        {rest.length > 0 && (
+          <button
+            type="button"
+            className="cursor-pointer text-muted underline-offset-2 hover:text-ink hover:underline"
+            aria-expanded={expanded}
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded ? "Show less" : `+${rest.length} more ${rest.length === 1 ? "rule" : "rules"}`}
+          </button>
+        )}
+        <button
+          type="button"
+          className="ml-auto cursor-pointer font-semibold text-brand underline-offset-2 hover:underline"
+          onClick={() => void onShow().then((shown) => setHidden(!shown))}
+        >
+          Show on page
+        </button>
+      </div>
+      {hidden && (
+        <div role="status" className="mt-1 text-[12px] text-muted">
+          This link isn't visible on the page right now.
         </div>
       )}
     </li>
@@ -72,6 +115,7 @@ export function PageTab() {
   if (load.status === "error") return <p className="m-4 rounded-lg bg-chip p-3 text-muted">{load.message}</p>;
 
   const { total, flagged, pageUrl } = load.res;
+  const { tabId } = load;
   const high = flagged.filter((f) => f.analysis.level === "high").length;
   const suspicious = flagged.length - high;
   const pageHost = (() => {
@@ -82,7 +126,8 @@ export function PageTab() {
       return null;
     }
   })();
-  const pageDomain = pageHost ? parse(pageHost).domain : null;
+  // Same "which site is this" as the analyzer, so what the popup trusts is what the analyzer checks.
+  const pageDomain = pageHost ? siteOf(pageHost) : null;
 
   return (
     <>
@@ -106,7 +151,7 @@ export function PageTab() {
         ) : (
           <ul className="space-y-2">
             {flagged.map((f, i) => (
-              <LinkRow key={`${f.href}-${i}`} link={f} />
+              <LinkRow key={`${f.id}-${i}`} link={f} onShow={() => showOnPage(tabId, f.id)} />
             ))}
           </ul>
         )}
@@ -123,6 +168,15 @@ export function PageTab() {
                   Remove
                 </button>
               </>
+            ) : high > 0 ? (
+              // Same rule as the card: never trust in one click when something here looks dangerous.
+              <ConfirmButton
+                label="Trust this site"
+                buttonClass={BUTTON.secondary}
+                question={`${high} high-risk ${high === 1 ? "link" : "links"} here. Trust anyway?`}
+                confirmLabel="Yes, trust"
+                onConfirm={() => void addTrusted(pageDomain)}
+              />
             ) : (
               <button type="button" className={BUTTON.secondary} onClick={() => void addTrusted(pageDomain)}>
                 Trust this site
